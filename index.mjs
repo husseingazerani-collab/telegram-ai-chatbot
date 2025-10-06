@@ -1,113 +1,101 @@
+import { Client, Databases, ID, Query } from "appwrite";
 import fetch from "node-fetch";
-import { Client, Databases, ID } from "node-appwrite";
 
-// --- Environment Variables ---
-const {
-  TELEGRAM_BOT_TOKEN,
-  OPENROUTER_API_KEY,
-  OPENROUTER_MODEL,
-  APPWRITE_ENDPOINT,
-  APPWRITE_PROJECT,
-  APPWRITE_API_KEY,
-  APPWRITE_DATABASE_ID,
-  USERS_COLLECTION,
-  CHATS_COLLECTION,
-} = process.env;
+// تابع اصلی
+export default async function (req, res) {
 
-// --- Initialize Appwrite Client ---
-const client = new Client()
-  .setEndpoint(APPWRITE_ENDPOINT)
-  .setProject(APPWRITE_PROJECT)
-  .setKey(APPWRITE_API_KEY);
+  // 1️⃣ دریافت payload تلگرام از body
+  let payload = {};
+  try {
+    payload = JSON.parse(await new Promise((resolve, reject) => {
+      let body = "";
+      req.on("data", chunk => body += chunk.toString());
+      req.on("end", () => resolve(body));
+      req.on("error", err => reject(err));
+    }));
+  } catch (err) {
+    console.error("Invalid payload", err);
+    res.status(400).send("Invalid payload");
+    return;
+  }
 
-const databases = new Databases(client);
+  const message = payload.message;
+  if (!message) {
+    res.status(200).send("No message");
+    return;
+  }
 
-// --- Helper: Send Message to Telegram ---
-async function sendTelegramMessage(chatId, text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
+  const chatId = message.chat.id;
+  const userId = message.from.id;
+  const text = message.text || "";
+
+  // 2️⃣ اتصال به Appwrite
+  const client = new Client();
+  client.setEndpoint(process.env.APPWRITE_ENDPOINT)
+        .setProject(process.env.APPWRITE_PROJECT)
+        .setKey(process.env.APPWRITE_API_KEY);
+  const databases = new Databases(client);
+  const DB_ID = process.env.APPWRITE_DATABASE_ID;
+  const USERS_COLLECTION = process.env.USERS_COLLECTION;
+  const CHATS_COLLECTION = process.env.CHATS_COLLECTION;
+
+  // 3️⃣ ثبت کاربر اگر وجود نداشت
+  try {
+    await databases.getDocument(DB_ID, USERS_COLLECTION, String(userId));
+  } catch {
+    await databases.createDocument(DB_ID, USERS_COLLECTION, ID.unique(), {
+      userId,
+      firstName: message.from.first_name,
+      lastName: message.from.last_name || "",
+      username: message.from.username || "",
+      usage: 0,
+    });
+  }
+
+  // 4️⃣ ذخیره پیام کاربر
+  await databases.createDocument(DB_ID, CHATS_COLLECTION, ID.unique(), {
+    userId,
+    role: "user",
+    text,
+    chatId,
   });
-}
 
-// --- Helper: Get AI Response from OpenRouter ---
-async function getAIResponse(messages) {
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  // 5️⃣ دریافت آخرین ۱۰ پیام
+  const lastMessagesRes = await databases.listDocuments(DB_ID, CHATS_COLLECTION, [
+    Query.equal("userId", userId),
+    Query.limit(10),
+  ]);
+  const lastMessages = lastMessagesRes.documents.map(doc => ({ role: doc.role, content: doc.text }));
+
+  // 6️⃣ ارسال به OpenRouter
+  const aiRes = await fetch("https://api.openrouter.ai/v1/chat/completions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: OPENROUTER_MODEL,
-      messages: messages.map((msg) => ({
-        role: msg.role,
-        content: msg.content,
-      })),
+      model: process.env.OPENROUTER_MODEL,
+      messages: lastMessages,
     }),
   });
+  const aiData = await aiRes.json();
+  const aiText = aiData.choices?.[0]?.message?.content || "متاسفم، پاسخ آماده نیست.";
 
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content || "پاسخی از مدل دریافت نشد.";
+  // 7️⃣ ارسال پاسخ به تلگرام
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text: aiText }),
+  });
+
+  // 8️⃣ ذخیره پاسخ AI
+  await databases.createDocument(DB_ID, CHATS_COLLECTION, ID.unique(), {
+    userId,
+    role: "assistant",
+    text: aiText,
+    chatId,
+  });
+
+  res.status(200).send("ok");
 }
-
-// --- Main Function ---
-export default async ({ req, res }) => {
-  try {
-    const body = JSON.parse(req.body);
-    const message = body?.message?.text;
-    const chatId = body?.message?.chat?.id;
-    const userId = body?.message?.from?.id;
-
-    if (!message || !chatId || !userId) {
-      return res.send("No valid Telegram message received.");
-    }
-
-    // Create or update user
-    try {
-      await databases.createDocument(APPWRITE_DATABASE_ID, USERS_COLLECTION, userId.toString(), {
-        telegram_id: userId,
-      });
-    } catch (e) {
-      // Ignore if user exists
-    }
-
-    // Save user message
-    await databases.createDocument(APPWRITE_DATABASE_ID, CHATS_COLLECTION, ID.unique(), {
-      user_id: userId,
-      role: "user",
-      content: message,
-    });
-
-    // Fetch last 10 messages
-    const chatHistory = await databases.listDocuments(APPWRITE_DATABASE_ID, CHATS_COLLECTION, [
-      `equal("user_id", ${userId})`,
-      "orderDesc($createdAt)",
-      "limit(10)",
-    ]);
-
-    const messages = chatHistory.documents
-      .reverse()
-      .map((doc) => ({ role: doc.role, content: doc.content }));
-
-    // Get AI response
-    const aiResponse = await getAIResponse(messages);
-
-    // Save AI response
-    await databases.createDocument(APPWRITE_DATABASE_ID, CHATS_COLLECTION, ID.unique(), {
-      user_id: userId,
-      role: "assistant",
-      content: aiResponse,
-    });
-
-    // Send reply to Telegram
-    await sendTelegramMessage(chatId, aiResponse);
-
-    return res.json({ ok: true });
-  } catch (error) {
-    console.error("Error:", error);
-    return res.json({ error: error.message });
-  }
-};
