@@ -6,7 +6,7 @@ export default async function handler(req, res) {
     // لاگ پیام دریافتی از تلگرام
     console.log("Received body:", req.body);
 
-    // پاسخ 200 به تلگرام حتماً باید باشه
+    // پاسخ 200 حتماً باید باشه
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
