@@ -8,8 +8,9 @@
     "start": "node index.mjs"
   },
   "dependencies": {
-    "node-fetch": "^3.3.2",
+    "appwrite": "^13.0.0",
     "dotenv": "^16.3.1",
-    "appwrite": "^13.0.0"
+    "node-appwrite": "^20.2.1",
+    "node-fetch": "^3.3.2"
   }
 }
