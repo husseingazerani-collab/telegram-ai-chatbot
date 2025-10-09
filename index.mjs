@@ -3,12 +3,10 @@ import fetch from "node-fetch";
 
 export default async function handler(req, res) {
   try {
-    const body = req.body;
+    // لاگ پیام دریافتی از تلگرام
+    console.log("Received body:", req.body);
 
-    // فقط یک مثال پاسخ ساده
-    console.log("Received body:", body);
-
-    // پاسخ 200 به تلگرام
+    // پاسخ 200 به تلگرام حتماً باید باشه
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
